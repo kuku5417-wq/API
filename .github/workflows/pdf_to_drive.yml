@@ -1,0 +1,36 @@
+name: PDF to Google Drive
+
+on:
+  push:
+    paths:
+      - 'sample_data/**.pdf'
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Google Auth (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install PyMuPDF google-api-python-client google-auth
+
+      - name: Run PDF upload
+        env:
+          GOOGLE_DRIVE_SAMPLE_FOLDER_ID: ${{ secrets.DRIVE_SAMPLE_FOLDER_ID }}
+        run: python test/testDriveDB.py
