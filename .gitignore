@@ -1,0 +1,11 @@
+# 서비스 계정 키 / 인증 정보
+.streamlit/*.json
+.streamlit/secrets.toml
+
+# 생성된 데이터 파일
+output/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo

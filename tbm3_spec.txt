@@ -1,0 +1,426 @@
+================================================================================
+ TBM3 스트림릿 앱 전체 기획서
+ 작성일: 2026-03-12
+ 기반: tbm1/tbm_chatbot.py 구조 참고, tbm3 데이터 구조 적용
+================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. 프로젝트 개요
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+목적: PTW(Permit To Work) 기반 TBM(Tool Box Meeting) 스크립트 자동 생성
+대상: 조선소 현장 반장/팀장
+특징:
+  - tbm1 대비 ptw_general(일반) + ptw_zlng(LNG) 두 종류 PTW 처리
+  - ptwlist는 두 테이블을 병합하여 생성 (앱 내부에서도 수행)
+  - 사고사례 PDF 원본 첨부 기능
+  - 팀장전달사항 관리 UI (입력 + 참고자료 업로드)
+  - 스크립트 생성 시 PDF 묶음 출력 가능
+  - 스크립트 인쇄 기능 (브라우저 인쇄 다이얼로그 호출)
+  - 스크립트 이메일 송부 기능 (SMTP, 첨부파일 포함)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. 파일 구조
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GitHub/tbm3/
+├── tbm3_app.py                   # 메인 스트림릿 앱
+├── db.py                         # Google Drive CSV 데이터 레이어 (tbm1 복사)
+├── generate_ptwdata.py           # PTW 더미데이터 생성 + Drive 업로드
+├── generate_accident_data.py     # 사고사례 더미데이터 생성 + PDF 생성 + Drive 업로드
+├── tbm3_spec.txt                 # 이 파일 (기획서)
+├── output/                       # 로컬 CSV 저장 폴더
+├── .streamlit/
+│   ├── tbmsample-7eaea86951af.json   # 서비스 계정 키
+│   └── secrets.toml              # API 키 등
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. Google Drive 데이터 구조
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+서비스 계정: tbm-312@tbmsample.iam.gserviceaccount.com
+※ 서비스 계정 storage quota 없음 → Shared Drive 이전 또는 수동 업로드 필요
+※ MySQL 서버 (shipinfo, pjtevemt): DB 접근 읽기 전용 (SELECT만) → 추출 후 Drive 업로드
+※ MSSQL 서버: DB 접근 읽기+쓰기 → 앱이 직접 생성/수정하는 데이터 포함
+※ Drive 폴더는 서버 구분과 동일하게 분리: sample/mssql ↔ sample/mysql
+
+[sample/mssql]  ID: 1pfW8vCXMdOz-2zcmfif-FuHRSm6Zsdl5  ← MSSQL 서버 데이터
+  ┌─────────────────────────┬──────────────────────────────┬──────────────────────────────────────────┐
+  │ CSV 파일                │ 원본 테이블                  │ 처리 방식                                │
+  ├─────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+  │ ptw_general.csv (231행) │ ptw_general                  │ 전체 컬럼 (26개) 추출                    │
+  │ ptw_zlng.csv    (103행) │ ptw_zlng                     │ 전체 컬럼 (24개) 추출                    │
+  │ ptwlist.csv     (334행) │ ptw_general + ptw_zlng       │ 공통 13컬럼 병합, source 컬럼으로 구분  │
+  │ pjtlist.csv      (10행) │ MySQL shipinfo 가공          │ 앱용 추출 + FUEL/PROJSEQ 파생            │
+  │                         │                              │ ※ db.py get_project_info()가 읽는 파일  │
+  │ project_milestone.csv   │ MySQL pjtevemt 가공          │ COALESCE(PERF>PROS>PLAN) 추출·가공      │
+  │                 (130행) │                              │ 이벤트별 행으로 정규화 (앱용)            │
+  │ accident.csv            │ generate_accident_data.py    │ 앱 생성 (더미 생성 예정)                 │
+  │ message.csv             │ 앱 입력                      │ 앱 생성/수정 — 팀장전달사항              │
+  │ accident_pdf/           │ generate_accident_data.py    │ 사고사례 PDF (accident_{id}.pdf)         │
+  └─────────────────────────┴──────────────────────────────┴──────────────────────────────────────────┘
+
+[sample/mysql]  ID: TODO — Drive에서 폴더 생성 후 generate_ptwdata.py의 MYSQL_FOLDER_ID 기입
+                ← MySQL 원본만 (DB 읽기전용 → 추출 그대로 저장)
+  ┌─────────────────────────┬──────────────────────────────┬──────────────────────────────────────────┐
+  │ CSV 파일                │ 원본 테이블                  │ 처리 방식                                │
+  ├─────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+  │ shipinfo.csv     (10행) │ shipinfo                     │ 전체 컬럼 추출 (UID 제외, 27컬럼)       │
+  │ pjtevent.csv     (10행) │ pjtevemt                     │ wide format 원본 (PLAN/PROS/PERF 전체)  │
+  └─────────────────────────┴──────────────────────────────┴──────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. 데이터 구조 상세
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[4-1] ptw_general 컬럼 (26개)
+  permit_no, status, category, safety_check, safety_checker,
+  team, department, manager, contact,
+  sub_contractor, sub_manager, sub_contact,
+  supervisor, workers, location, confined, category_type,
+  start, finish, project, area, work_detail,
+  coordinator_comment, mixed_approval_date, overtime_reason, work_type
+
+[4-2] ptw_zlng 컬럼 (24개)
+  approval, status, category, permit_no,
+  department, manager, contact, supervisor,
+  confined, category_type,
+  start, finish, project, area, work_detail,
+  equipment_owner_1st, equipment_owner_2nd,
+  system_no, subsystem_desc, scope,
+  site_check, icc_no, team, work_type
+
+[4-3] ptwlist 추출 컬럼 (13개) — 앱에서도 동적 생성
+  source (ptw_general / ptw_zlng)
+  status, category, team, department, manager,
+  confined, start, finish, project, area, work_detail, work_type
+
+[4-4] accident 컬럼 (9개)
+  id, date (사고일시), summary (사고개요), cause (사고원인),
+  result (사고결과/피해), countermeasure (대책),
+  accident_type (사고유형), work_keywords (관련작업키워드),
+  source (출처), pdf_filename (Drive 저장 PDF 파일명)
+
+[4-5] message 컬럼 (5개)
+  date (날짜), team (팀), content (전달사항 내용),
+  ref_type (참고자료 유형: pdf/image/video/link/없음),
+  ref_path (Drive 파일 ID 또는 URL)
+
+[4-6] shipinfo.csv 컬럼 (27개) — MySQL shipinfo 전체 컬럼
+  SHIPNUM      : 선박번호 (varchar 20, NOT NULL)
+  MAINHULLNUM  : 시리즈대표선박번호 (varchar 20)
+  SEQNO        : 시리즈순서 (int 11)
+  TITLE        : 선박명 (varchar 30)
+  IMO          : IMO번호 (varchar 20, NOT NULL)
+  MMSI         : MMSI번호 (varchar 20)
+  SHIPTYPE     : 선박유형 (varchar 200)
+  REGOWNER     : 선주 (varchar 100)
+  BUILTDATE    : 건조년도 (varchar 4)
+  FLAG         : 국적 (varchar 30)
+  GROSSTON     : 총톤수 (varchar 15)
+  DWT          : 하기재화중량톤수 (varchar 15)
+  LOA          : 선박길이 (varchar 15)
+  DRAUGHT      : 흘수 (varchar 15)
+  BUILDER      : 빌더 (varchar 15)
+  BUILTBY      : 건조처 (varchar 100)
+  WORKFINISH   : 선박건조완료일 (date)
+  ISDEFAULT    : 기본값여부 (char 1)
+  STATUS       : 상태 (varchar 15, NOT NULL) — 'A' 활성
+  INSERTBY     : 생성자 (bigint 20, NOT NULL)
+  INSERTDATE   : 생성일 (datetime, NOT NULL)
+  UPDATEBY     : 수정자 (bigint 20, NOT NULL)
+  UPDATEDATE   : 수정일 (datetime, NOT NULL)
+  SHIPCLASS    : 선급 (varchar 20)
+  TYPEMODEL    : TYPE (varchar 20)
+  DOCK         : DOCK (varchar 20)
+  LOC          : (varchar 20, 설명 미확인)
+  ※ UID(PK, auto_increment)는 CSV에서 제외 (DB 삽입 시 자동 생성)
+
+[4-7] pjtlist 컬럼 — MySQL shipinfo 기반
+  shipnum      : 호선번호 (PK, 앱 조회 키)       ← shipinfo.SHIPNUM
+  MAINHULLNUM  : 선각번호                         ← shipinfo.MAINHULLNUM
+  SEQNO        : 시리즈 순번 (int)                ← shipinfo.SEQNO (int(11))
+  TITLE        : 선박명                           ← shipinfo.TITLE
+  IMO          : IMO번호                          ← shipinfo.IMO
+  SHIPTYPE     : 선종 (CNT/LNG/ETH 등)            ← shipinfo.SHIPTYPE
+  REGOWNER     : 선주                             ← shipinfo.REGOWNER
+  TYPEMODEL    : 형식 (15000 TEU / 174K 등)       ← shipinfo.TYPEMODEL
+  FUEL         : 연료 (DF/LNG) — 파생 컬럼        ← shipinfo에 없음, SHIPTYPE 기반 파생
+                 LNG/ETH → "LNG", 나머지 → "DF"
+  PROJSEQ      : 앱 표시용 순번 — 파생 컬럼        ← shipinfo에 없음, SEQNO 활용
+  ※ 실제 전환 시 SELECT:
+     SELECT SHIPNUM, MAINHULLNUM, SEQNO, TITLE, IMO, SHIPTYPE, REGOWNER, TYPEMODEL, SHIPCLASS, DOCK
+     FROM shipinfo WHERE STATUS='A'
+
+[4-8] project_milestone 컬럼 — MySQL pjtevemt 기반
+  project        : 호선번호                        ← pjtevemt.PJT
+  event_type     : 이벤트 타입 (아래 목록 참조)
+  event_date     : 이벤트 시작일 (PERF > PROS > PLAN 우선)
+  event_date_end : 이벤트 종료일 (범위 이벤트만, 나머지 공백)
+  date_type      : 날짜 유형 (실적/전망/계획)
+
+  이벤트 목록 (시운전 진행 순) — STD/LNG 공통 (★=LNG 전용):
+    이벤트     한국어          범위여부  pjtevemt 컬럼
+    L/C        용골거치        단일      PERFLC / PROSLC / PLANLC
+    S/P On     상가            단일      PERFSP / PROSSP / PLANSP
+    B/T        보일러 시험     단일      PERFBT / PROSBT / PLANBT
+    G/T        발전기 시험     단일      PERFGT / PROSGT / PLANGT
+    CMR        항해의장완료    단일      PERFCMR / PROSCMR / PLANCMR
+    M/T        주기관 시험     단일      PERFMT / PROSMT / PLANMT
+    I/E        경사시험        단일      PERFIE / PROSIE / PLANIE
+    A/C        투묘시험        범위(7일) PERFACFROM/TO / PROSACFROM/TO / PLANACFROM/TO
+    S/T        항해시험        범위(21일) PERFSTFROM/TO / PROSSTFROM/TO / PLANSTFROM/TO
+    Cold/T ★   냉각시험        범위(14일) PERFCOLDFROM/TO / PROSCOLDFROM/TO / PLANCOLDFROM/TO
+    LNG/B      LNG Bunkering   범위(7일)  PERFLNGFROM/TO / PROSLNGFROM/TO / PLANLNGFROM/TO
+    GAS/T ★    가스시험,DP     범위(14일) PERFGASFROM/TO / PROSGASFROM/TO / PLANGASFROM/TO
+    W/F        인수도          단일      PERFWF / PROSWF / PLANWF
+    D/L        인도            단일      PERFDL / PROSDL / PLANDL
+  ※ LNG/B는 LNG 전용 아님 — STD(일반선) 포함 전 선종 적용
+  ※ DT(인도시험) 컬럼 pjtevemt에 없음
+  ※ 전망 prefix: PROS (PRO 아님)
+  ※ 범위 이벤트 컬럼명: FROM/TO 직접 붙임 (예: PLANSTFROM, 언더스코어 없음)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. 앱 메뉴 구성 (사이드바 네비게이션)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[메뉴 1] TBM 스크립트 생성 (메인, 기본값)
+  - 사이드바: 날짜, 호선, 부서, 이름, PTW 소스 선택(일반/LNG/전체)
+  - 자동 모드: ptwlist 조회 결과에 따라 작업허가서 모드 / 일상작업 모드 전환
+  - 스크립트 생성 버튼
+
+[메뉴 2] 팀장전달사항 관리
+  - 전달사항 조회: 날짜 + 팀 선택 → 기존 내용 표시
+  - 전달사항 입력: 텍스트 입력 폼
+  - 참고자료 업로드:
+    * PDF 파일 업로드 → Drive accident_pdf/ 폴더에 저장
+    * 이미지 파일 업로드 (jpg/png)
+    * 동영상 파일 업로드 또는 외부 링크(YouTube 등) 입력
+    * 외부 링크 URL 직접 입력
+  - 저장 버튼 → message.csv 업데이트 (Drive)
+
+[메뉴 3] 사고사례 조회
+  - 작업유형별 필터링
+  - 사고사례 목록 표시 (사고일시, 사고개요, 사고유형)
+  - 사고사례 상세 → PDF 다운로드 버튼 포함
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. TBM 스크립트 섹션 구성 (7섹션, tbm1 동일 구조 유지)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+① 건강상태 확인
+② 날씨 위험요소 (날씨 API 또는 더미 데이터)
+③ 팀장 전달사항 (message.csv, 참고자료 있으면 링크/미리보기 표시)
+④ 작업허가 내용 및 위험요소 (ptwlist 기반, source 구분)
+   - ptw_general: 일반 허가서 카드
+   - ptw_zlng: LNG 허가서 카드 (LNG 특화 경고 추가)
+⑤ 호선 주요 일정 (마일스톤, tbm1과 동일)
+⑥ 유사 사고 사례 (accident.csv 기반, 관련 PDF 다운로드 버튼 포함)
+⑦ 안전구호
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. 사고사례 데이터 생성 (generate_accident_data.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+생성 건수: 50건 이상 (작업유형별 안배)
+  - LNG작업 관련: 10건
+  - 고압작업: 8건
+  - 밀폐작업: 8건
+  - 시운전작업: 8건
+  - 발전기가동: 6건
+  - 전기작업: 6건
+  - 일반작업/기타: 나머지
+
+컬럼:
+  id             : ACC001, ACC002 ...
+  date           : 사고일시 (예: 2024-08)
+  summary        : 사고개요 (2~3문장)
+  cause          : 사고원인
+  result         : 사고결과/피해 (부상/사망/재산피해 등) ← tbm1 대비 추가
+  countermeasure : 대책
+  accident_type  : 추락/끼임/질식/폭발/감전/화재/충돌 등
+  work_keywords  : 관련 작업 키워드 (work_type 매핑용)
+  source         : 출처 URL 또는 기관명
+  pdf_filename   : accident_ACC001.pdf 등
+
+PDF 생성:
+  - reportlab 라이브러리 사용
+  - 각 사고사례를 1페이지 PDF로 생성
+  - 내용: 사고개요, 원인, 피해, 대책, 출처
+  - 심플한 레이아웃 (제목, 구분선, 내용)
+  - Drive sample/mssql/accident_pdf/ 폴더에 업로드
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. 팀장전달사항 관리 화면 상세 (메뉴 2)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+레이아웃:
+  상단: 날짜 선택 + 팀 선택 → [조회] 버튼
+  중단: 기존 전달사항 표시 (없으면 "등록된 내용 없음")
+  하단: 입력 폼
+    - 전달사항 텍스트 (textarea)
+    - 참고자료 섹션:
+        탭 구분: [파일 업로드] / [링크 입력]
+        파일 업로드 탭:
+          * PDF, 이미지(jpg/png), 동영상(mp4) 업로드 허용
+          * 업로드 후 Drive sample/mssql/ref_files/ 폴더에 저장
+          * 미리보기: 이미지는 썸네일, PDF는 파일명+다운로드 링크
+        링크 입력 탭:
+          * URL 텍스트 입력 (YouTube, 뉴스, 보고서 등)
+          * 링크 유형 자동 감지 (YouTube → 임베드 가능)
+    - [저장] 버튼 → message.csv에 행 추가 후 Drive 업로드
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. 스크립트 생성 시 참고자료 표시 방식
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[③ 팀장전달사항 섹션]
+  - 전달사항 텍스트 표시
+  - 참고자료 있으면 하단에 표시:
+    * PDF → "📄 [파일명] 다운로드" 버튼 (Drive 직접 링크)
+    * 이미지 → 썸네일 표시 (st.image)
+    * 동영상 → 재생 버튼 또는 외부 링크
+    * URL → 클릭 가능한 링크 + 간단한 설명
+
+[⑥ 유사 사고 사례 섹션]
+  - 사고 카드 하단에 "📄 사고사례 원본 PDF" 다운로드 버튼
+  - pdf_filename이 있는 경우 Drive에서 직접 다운로드 URL 생성
+  - 없는 경우 버튼 비활성화
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. db.py 추가/변경 함수 목록 (tbm1 대비)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+기존 tbm1 유지 함수:
+  get_weather(date_str)
+  get_message(date_str, team)
+  get_accident_cases(work_type, limit)
+  get_project_info(project)
+  get_milestones(project, date_str, days_ahead)
+
+tbm3 신규/변경 함수:
+  get_ptwlist(date_str, project, department, manager)
+    → ptw_general + ptw_zlng 병합 후 날짜/조건 필터링
+    → start 컬럼 기준으로 date_str 날짜 포함 건 조회
+  get_ptw_general(date_str, ...)
+    → ptw_general만 조회
+  get_ptw_zlng(date_str, ...)
+    → ptw_zlng만 조회
+  get_accident_cases_with_pdf(work_type, limit)
+    → accident.csv에서 조회, pdf_filename 포함
+  get_drive_download_url(file_id)
+    → Drive 파일 직접 다운로드 URL 반환
+  save_message(date_str, team, content, ref_type, ref_path)
+    → message.csv에 행 추가 후 Drive 업로드
+  upload_ref_file(file_bytes, filename, folder_id)
+    → 참고자료 파일 Drive 업로드
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. PTW 소스 구분 처리 (tbm3 핵심 차이점)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ptwlist의 source 컬럼으로 카드 스타일 구분:
+  ptw_general: 파란색 카드 (기존 permit-card 스타일 유지)
+  ptw_zlng:    보라색 카드 (LNG 특화 경고 배지 추가)
+
+LNG 특화 위험요소 (ptw_zlng 항목에만 추가):
+  - LNG 누출 시 즉시 대피, 가스 감지기 상시 확인
+  - 극저온 화상 방지 (절연 장갑 착용)
+  - 작업 전 IGS 계통 확인
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. 인쇄 및 이메일 송부 기능
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[12-1] 인쇄 기능
+  - 스크립트 생성 후 상단에 [인쇄] 버튼 표시
+  - 클릭 시 JavaScript window.print() 호출
+  - 인쇄용 CSS (@media print): 사이드바 숨김, 버튼 숨김, 폰트 조정
+  - 구현: st.markdown() + JS inject 방식
+
+[12-2] 이메일 송부 기능
+  - 스크립트 생성 후 상단에 [이메일 전송] 버튼 표시
+  - 클릭 시 수신자 입력 폼 expander 열림:
+      수신자 이메일 (텍스트 입력, 복수 입력 시 쉼표 구분)
+      참조(CC) 이메일 (선택)
+      제목 (자동 생성: "TBM 스크립트 - {날짜} {부서}")
+      본문 미리보기 (HTML → 텍스트 변환 요약)
+      첨부파일: 사고사례 PDF 포함 여부 체크박스
+  - [전송] 버튼 → smtplib로 발송
+
+  SMTP 설정 (secrets.toml에 저장):
+    [smtp]
+    server   = "smtp.gmail.com"       # 실제 사내 SMTP로 교체
+    port     = 587
+    user     = "sender@company.com"   # 발신자 계정
+    password = "app_password_here"    # 앱 비밀번호 또는 계정 비밀번호
+    from_name = "TBM 스크립트 시스템"
+
+  이메일 포맷:
+    - Content-Type: multipart/mixed
+    - HTML 본문: 스크립트 주요 내용 (섹션별 요약)
+    - 첨부파일: 사고사례 PDF (선택 시 Drive에서 다운로드 후 첨부)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. 기술 스택 및 의존성
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Python: 3.12.7
+가상환경: code/.venv (공유)
+
+주요 패키지:
+  streamlit          - 웹 UI
+  pandas             - 데이터 처리
+  google-auth        - 서비스 계정 인증
+  google-api-python-client - Drive API
+  reportlab          - PDF 생성 (사고사례 PDF)
+  Pillow             - 이미지 처리 (선택)
+  smtplib            - 이메일 발송 (표준 라이브러리, 별도 설치 불필요)
+  email              - 이메일 구성 (표준 라이브러리)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. 개발 순서 (TODO)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Step 1. generate_ptwdata.py [완료 ✓]
+  ✓ ptw_general (231행), ptw_zlng (103행), ptwlist (334행) 생성
+  ✓ pjtlist (10행) 생성 — shipinfo 앱용 추출 + FUEL/PROJSEQ 파생
+  ✓ shipinfo (10행) 생성 — 실제 테이블 전체 컬럼 (27개, UID 제외)
+  ✓ pjtevent (10행) 생성 — wide format 원본 (PLAN/PROS/PERF × 이벤트 컬럼)
+  ✓ project_milestone (130행) 생성 — pjtevemt COALESCE 가공
+  ✓ pjtevemt 실제 컬럼 반영 (PROS prefix, FROM/TO 직결, CMR, A/C 범위, LNG/B 전선종)
+  ✓ 로컬 output/ 저장 완료
+  ✗ Drive 업로드 미완 (서비스 계정 quota 없음 → Shared Drive 이전 필요)
+
+Step 2. generate_accident_data.py 작성 [미완]
+  - 50건 사고사례 더미데이터 생성 (사고결과/피해 컬럼 포함)
+  - reportlab으로 사고사례별 PDF 생성
+  - accident.csv + PDF 파일들 Drive 업로드
+
+Step 3. db.py 업데이트 [미완]
+  - tbm1 db.py 기반으로 tbm3 신규 함수 추가
+  - get_project_info(): pjtlist.csv 조회, 매칭 컬럼 shipnum
+  - get_milestones(): event_date_end 처리, 진행중 범위 이벤트 포함
+  - MSSQL_FOLDER_ID = "1pfW8vCXMdOz-2zcmfif-FuHRSm6Zsdl5" (sample/mssql)
+  - MYSQL_FOLDER_ID  = TODO (sample/mysql, Drive 폴더 생성 후 기입)
+
+Step 4. tbm3_app.py 작성 (메인 앱) [미완]
+  - 메뉴 1: TBM 스크립트 생성 (tbm1 tbm_chatbot.py 기반 리팩터링)
+    * EVENT_KR: 새 이벤트 타입 매핑 (L/C, S/P On, B/T, G/T, CMR, M/T, I/E, A/C,
+                S/T, Cold/T, LNG/B, GAS/T, W/F, D/L)
+    * render_milestones(): 범위 이벤트 "시작~종료 [진행중]" 표시
+    * 실적/전망/계획 배지 색상: 녹색/파랑/회색
+    * 헤더 FUEL 배지: DF→보라색
+  - 메뉴 2: 팀장전달사항 관리 (신규)
+  - 메뉴 3: 사고사례 조회 (신규)
+
+Step 5. Drive 업로드 문제 해결 [미완]
+  - sample/mssql 폴더를 공유 드라이브로 이전 OR 서비스 계정 권한 조정
+  - 해결 후 generate_ptwdata.py 재실행으로 Drive 업로드
+
+Step 6. 통합 테스트 [미완]
+  - 실제 PTW 데이터로 스크립트 생성 검증
+  - PDF 다운로드 동작 확인
+  - 전달사항 입력/저장/조회 확인
+
+================================================================================
